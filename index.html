@@ -46,6 +46,8 @@
   #wall li { font-size:14px; font-weight:700; line-height:1.35; padding:5px 8px; border-radius:6px; background:rgba(255,255,255,.08);
     cursor:pointer; animation:in .5s ease; word-break:keep-all; }
   #wall li.mine { background:rgba(242,184,75,.28); }
+  #wall li.npc { opacity:.7; font-weight:600; }
+  #wall li small { font-size:11px; color:var(--dim); }
   #wall:empty, #wall.empty { display:none; }
   @keyframes in { from { opacity:0; transform:translateY(-6px); } }
   @media (max-width:600px) {
@@ -83,6 +85,7 @@ const EXAM_DAY = new Date('2026-11-19T08:40:00+09:00');
 const MAX_PER_GATE = 12;
 const params = new URLSearchParams(location.search);
 const BOTS = Math.min(11, parseInt(params.get('bots') || '0', 10) || 0); // 혼자 테스트할 때만 쓰는 가짜 친구
+const NPC_COUNT = params.get('npc') === '0' ? 0 : 4; // 늘 교문 앞을 지키는 동네 주민 4명 (?npc=0 이면 끔)
 
 const ADJ = ['합격할','졸린','찹쌀떡 든','든든한','따뜻한','반짝이는','차분한','씩씩한','말랑한','잠 못 드는','배부른','용감한'];
 const ANI = ['다람쥐','수달','고양이','부엉이','여우','펭귄','곰','토끼','오리','고슴도치','강아지','너구리'];
@@ -328,7 +331,7 @@ const falling = [];
 const yeotMat = new THREE.MeshStandardMaterial({ color: 0xc98a2e, roughness: .35, emissive: 0x6b3a00, emissiveIntensity: .15 });
 const tapeMat = new THREE.MeshStandardMaterial({ color: 0xf5f0e0, roughness: .9 });
 const yeots = new Map(); // id -> mesh
-function addYeot({ id, x, y, tilt, note }, mine = false, pop = true) {
+function addYeot({ id, x, y, tilt, note, local }, mine = false, pop = true) {
   if (yeots.has(id)) return;
   note = cleanNote(note);
   const g = new THREE.Group();
@@ -339,7 +342,7 @@ function addYeot({ id, x, y, tilt, note }, mine = false, pop = true) {
   g.position.set(x, y, 0.06); g.rotation.z = tilt;
   g.scale.setScalar(0.01);
   g.userData.born = performance.now();
-  g.userData.note = note;
+  g.userData.note = note; g.userData.local = !!local; // 동네 주민 엿은 내 화면에만 있고 남에게 넘기지 않는다
   if (note) {
     const el = document.createElement('div'); el.className = 'note' + (mine ? ' mine' : ''); el.textContent = note;
     const o = new CSS2DObject(el); o.position.set(0, 0.45, 0); g.add(o); g.userData.noteEl = el;
@@ -356,6 +359,7 @@ function popNote(g) {
 const wall = document.getElementById('wall'), wallList = document.getElementById('wallList');
 function addToWall(note, mine, g) {
   const li = document.createElement('li'); li.textContent = note; if (mine) li.classList.add('mine');
+  if (g.userData.local) { li.classList.add('npc'); const t = document.createElement('small'); t.textContent = ' · 주민'; li.append(t); }
   li.title = '누르면 교문에서 다시 보여요';
   li.addEventListener('click', () => popNote(g));
   wallList.prepend(li);
@@ -516,7 +520,7 @@ function removePeer(id) {
 
 function hello(to) {
   actions.sendHello({ name: me.name, color: me.color, slot: myChar.slot }, to);
-  const list = [...yeots.entries()].map(([id, g]) => ({ id, x: g.position.x, y: g.position.y, tilt: g.rotation.z, note: g.userData.note }));
+  const list = [...yeots.entries()].filter(([, g]) => !g.userData.local).map(([id, g]) => ({ id, x: g.position.x, y: g.position.y, tilt: g.rotation.z, note: g.userData.note }));
   if (list.length) actions.sendYeots(list, to);
 }
 
@@ -554,6 +558,7 @@ async function enterGate(no) {
 async function start() {
   myChar = makeChar(me.name, me.color, true);
   setSlot(myChar, 0);
+  spawnNpcs();
   if (!joinRoom) { toast('혼자 모드예요. 인터넷 연결을 확인해 주세요'); spawnBots(); return; }
   for (let no = 1; no < 50; no++) {
     await enterGate(no);
@@ -567,6 +572,28 @@ async function start() {
   updateCount();
   toast(peerInfo.size ? `${peerInfo.size}명이 먼저 와 있어요` : '첫 번째로 왔어요. 친구를 불러 보세요');
   spawnBots();
+}
+
+// ---------- 동네 주민: 아무도 없을 때도 교문이 비어 보이지 않게 ----------
+// 사람 수에는 세지 않고, 이름도 「주민」으로 붙여 진짜 접속자와 구분한다.
+// 응원은 특정인 이름 없이 모두에게 하는 말만 붙인다.
+const npcs = [];
+const NPC_POS = [[-4.3, 2.3], [4.3, 2.3], [-3.2, 7.4], [3.2, 7.4]]; // 휴대폰 세로 화면에도 다 들어오는 자리
+const NPC_LINES = ['수험생 모두 화이팅', '찍은 것도 다 맞아라', '끝까지 힘내요', '떨지 말고 평소처럼', '올해 수험생 전원 합격', '따뜻하게 입고 가요'];
+const NPC_NAMES = ['문방구 사장님', '경비 아저씨', '옆 반 선생님', '붕어빵 아줌마'];
+function spawnNpcs() {
+  for (let i = 0; i < NPC_COUNT; i++) {
+    const c = makeChar(`${NPC_NAMES[i]} (주민)`, COLORS[(i * 3 + 2) % COLORS.length], false);
+    c.label.element.style.opacity = '.75';
+    c.home = new THREE.Vector3(NPC_POS[i][0], 0, NPC_POS[i][1]);
+    c.root.position.copy(c.home); c.root.rotation.y = Math.PI;
+    npcs.push(c);
+    const loop = () => setTimeout(() => {
+      const y = { ...randomSpot(c), note: pick(NPC_LINES), local: true };
+      goStick(c, y, () => addYeot(y, false, true)); loop();
+    }, 12000 + Math.random() * 20000);
+    setTimeout(loop, 2000 + i * 3500);
+  }
 }
 
 // ---------- 테스트용 가짜 친구 (?bots=5) ----------
@@ -620,6 +647,7 @@ function tick() {
   const dt = Math.min(clock.getDelta(), 0.05), time = clock.elapsedTime;
   if (myChar) animateChar(myChar, dt, time);
   chars.forEach(c => animateChar(c, dt, time));
+  npcs.forEach(c => animateChar(c, dt, time));
   yeots.forEach(g => {
     const age = (performance.now() - g.userData.born) / 1000;
     if (age < 0.5) g.scale.setScalar(Math.max(0.01, 1 + Math.sin(age / 0.5 * Math.PI) * 0.3 * (1 - age / 0.5)) * Math.min(1, age / 0.25 + 0.01));
